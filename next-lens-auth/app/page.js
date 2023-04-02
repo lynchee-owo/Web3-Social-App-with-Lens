@@ -1,91 +1,172 @@
-import Image from 'next/image'
-import { Inter } from 'next/font/google'
-import styles from './page.module.css'
+'use client' 
+import { useEffect, useState } from 'react'
+import { ethers } from 'ethers'
+import {
+  client, challenge, authenticate, getDefaultProfile,
+  signCreatePostTypedData, lensHub, splitSignature, validateMetadata
+} from '../api'
+import { create } from 'ipfs-http-client'
+import { v4 as uuid } from 'uuid'
 
-const inter = Inter({ subsets: ['latin'] })
+const projectId = process.env.NEXT_PUBLIC_PROJECT_ID
+const projectSecret = process.env.NEXT_PUBLIC_PROJECT_SECRET
+const auth = 'Basic ' + Buffer.from(projectId + ':' + projectSecret).toString('base64');
+
+const ipfsClient = create({
+  host: 'ipfs.infura.io',
+  port: 5001,
+  protocol: 'https',
+  headers: {
+      authorization: auth,
+  },
+})
 
 export default function Home() {
+  const [address, setAddress] = useState()
+  const [session, setSession] = useState(null)
+  const [postData, setPostData] = useState('')
+  const [profileId, setProfileId] = useState('')
+  const [handle, setHandle] = useState('')
+  const [token, setToken] = useState('')
+  useEffect(() => {
+    checkConnection()
+  }, [])
+  async function checkConnection() {
+    const provider = new ethers.providers.Web3Provider(window.ethereum)
+    const accounts = await provider.listAccounts()
+    if (accounts.length) {
+      setAddress(accounts[0])
+      const response = await client.query({
+        query: getDefaultProfile,
+        variables: { address: accounts[0] }
+      })
+      setProfileId(response.data.defaultProfile.id)
+      setHandle(response.data.defaultProfile.handle)
+    }
+  }
+  async function connect() {
+    const account = await window.ethereum.send('eth_requestAccounts')
+    if (account.result.length) {
+      setAddress(account.result[0])
+      const response = await client.query({
+        query: getDefaultProfile,
+        variables: { address: accounts[0] }
+      })
+      setProfileId(response.data.defaultProfile.id)
+      setHandle(response.data.defaultProfile.handle)
+    }
+  }
+  async function login() {
+    try {
+      const challengeInfo = await client.query({
+        query: challenge,
+        variables: {
+          address
+        }
+      })
+      const provider = new ethers.providers.Web3Provider(window.ethereum);
+      const signer = provider.getSigner()
+      const signature = await signer.signMessage(challengeInfo.data.challenge.text)
+      const authData = await client.mutate({
+        mutation: authenticate,
+        variables: {
+          address, signature
+        }
+      })
+
+      const { data: { authenticate: { accessToken }}} = authData
+      localStorage.setItem('lens-auth-token', accessToken)
+      setToken(accessToken)
+      setSession(authData.data.authenticate)
+    } catch (err) {
+      console.log('Error signing in: ', err)
+    }
+  }
+  async function createPost() {
+    if (!postData) return
+    const ipfsData = await uploadToIPFS()
+    const createPostRequest = {
+      profileId,
+      contentURI: 'ipfs://' + ipfsData.path,
+      collectModule: {
+        freeCollectModule: { followerOnly: true }
+      },
+      referenceModule: {
+        followerOnlyReferenceModule: false
+      },
+    }
+    try {
+      const signedResult = await signCreatePostTypedData(createPostRequest, token)
+      const typedData = signedResult.result.typedData
+      const { v, r, s } = splitSignature(signedResult.signature)
+      const tx = await lensHub.postWithSig({
+        profileId: typedData.value.profileId,
+        contentURI: typedData.value.contentURI,
+        collectModule: typedData.value.collectModule,
+        collectModuleInitData: typedData.value.collectModuleInitData,
+        referenceModule: typedData.value.referenceModule,
+        referenceModuleInitData: typedData.value.referenceModuleInitData,
+        sig: {
+          v,
+          r,
+          s,
+          deadline: typedData.value.deadline,
+        },
+      })
+      console.log('successfully created post: tx hash', tx.hash)
+    } catch (err) {
+      console.log('error posting publication: ', err)
+    }
+  }
+  async function uploadToIPFS() {
+    const metaData = {
+      version: '2.0.0',
+      content: postData,
+      description: postData,
+      name: `Post by @${handle}`,
+      external_url: `https://lenster.xyz/u/${handle}`,
+      metadata_id: uuid(),
+      mainContentFocus: 'TEXT_ONLY',
+      attributes: [],
+      locale: 'en-US',
+    }
+
+    const result = await client.query({
+      query: validateMetadata,
+      variables: {
+        metadatav2: metaData
+      }
+    })
+    console.log('Metadata verification request: ', result)
+      
+    const added = await ipfsClient.add(JSON.stringify(metaData))
+    return added
+  }
+  function onChange(e) {
+    setPostData(e.target.value)
+  }
   return (
-    <main className={styles.main}>
-      <div className={styles.description}>
-        <p>
-          Get started by editing&nbsp;
-          <code className={styles.code}>app/page.js</code>
-        </p>
-        <div>
-          <a
-            href="https://vercel.com?utm_source=create-next-app&utm_medium=appdir-template&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            By{' '}
-            <Image
-              src="/vercel.svg"
-              alt="Vercel Logo"
-              className={styles.vercelLogo}
-              width={100}
-              height={24}
-              priority
+    <div>
+      {
+        !address && <button onClick={connect}>Connect</button>
+      }
+      {
+        address && !session && (
+          <div onClick={login}>
+            <button>Login</button>
+          </div>
+        )
+      }
+      {
+        address && session && (
+          <div>
+            <textarea
+              onChange={onChange}
             />
-          </a>
-        </div>
-      </div>
-
-      <div className={styles.center}>
-        <Image
-          className={styles.logo}
-          src="/next.svg"
-          alt="Next.js Logo"
-          width={180}
-          height={37}
-          priority
-        />
-        <div className={styles.thirteen}>
-          <Image src="/thirteen.svg" alt="13" width={40} height={31} priority />
-        </div>
-      </div>
-
-      <div className={styles.grid}>
-        <a
-          href="https://beta.nextjs.org/docs?utm_source=create-next-app&utm_medium=appdir-template&utm_campaign=create-next-app"
-          className={styles.card}
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          <h2 className={inter.className}>
-            Docs <span>-&gt;</span>
-          </h2>
-          <p className={inter.className}>
-            Find in-depth information about Next.js features and API.
-          </p>
-        </a>
-
-        <a
-          href="https://vercel.com/templates?framework=next.js&utm_source=create-next-app&utm_medium=appdir-template&utm_campaign=create-next-app"
-          className={styles.card}
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          <h2 className={inter.className}>
-            Templates <span>-&gt;</span>
-          </h2>
-          <p className={inter.className}>Explore the Next.js 13 playground.</p>
-        </a>
-
-        <a
-          href="https://vercel.com/new?utm_source=create-next-app&utm_medium=appdir-template&utm_campaign=create-next-app"
-          className={styles.card}
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          <h2 className={inter.className}>
-            Deploy <span>-&gt;</span>
-          </h2>
-          <p className={inter.className}>
-            Instantly deploy your Next.js site to a shareable URL with Vercel.
-          </p>
-        </a>
-      </div>
-    </main>
+            <button onClick={createPost}>Create Post</button>
+          </div>
+        )
+      }
+    </div>
   )
 }
